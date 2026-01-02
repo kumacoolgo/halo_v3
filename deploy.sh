@@ -42,109 +42,91 @@ done
 [[ -n "$DOMAIN" ]] || die "--domain 必填"
 [[ "$WS_PATH" =~ ^/ ]] || die "--ws-path 必须以 / 开头"
 
-# ================= Docker 安装（稳定方案） =================
+# ================= Docker 安装 =================
 install_docker() {
   if command -v docker >/dev/null 2>&1; then
     info "Docker 已安装，跳过"
     return
   fi
 
-  info "使用镜像源安装 Docker（稳定方式）"
+  info "使用阿里云镜像安装 Docker"
 
-  run "apt-get update -y"
-  run "apt-get install -y ca-certificates curl gnupg lsb-release"
+  apt-get update -y
+  apt-get install -y ca-certificates curl gnupg lsb-release
 
-  run "mkdir -p /etc/apt/keyrings"
+  mkdir -p /etc/apt/keyrings
+  curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg \
+    | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 
-  run "curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg \
-    | gpg --dearmor -o /etc/apt/keyrings/docker.gpg"
-
-  run "echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
     https://mirrors.aliyun.com/docker-ce/linux/ubuntu \
-    \$(lsb_release -cs) stable\" \
-    > /etc/apt/sources.list.d/docker.list"
+    $(lsb_release -cs) stable" \
+    > /etc/apt/sources.list.d/docker.list
 
-  run "apt-get update -y"
+  apt-get update -y
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 
-  run "apt-get install -y \
-    docker-ce \
-    docker-ce-cli \
-    containerd.io \
-    docker-buildx-plugin \
-    docker-compose-plugin"
-
-  run "systemctl enable docker"
-  run "systemctl start docker"
-
-  info "Docker 安装完成"
+  systemctl enable docker
+  systemctl start docker
 }
 
-# ================= Docker Compose =================
 DC_CMD="docker compose"
 
 # ================= 卸载 =================
 if $UNINSTALL; then
   cd "$BASE_DIR" 2>/dev/null || exit 0
-  run "$DC_CMD down || true"
-  run "rm -rf $BASE_DIR"
+  $DC_CMD down || true
+  rm -rf "$BASE_DIR"
   echo "✅ 已卸载"
   exit 0
 fi
 
-# ================= 执行安装 =================
+# ================= 正式执行 =================
 install_docker
 
-info "安装系统依赖"
-run "apt-get install -y ufw openssl sqlite3"
+apt-get update -y
+apt-get install -y ufw openssl sqlite3
 
-info "创建目录结构"
-run "mkdir -p $BASE_DIR/{npm/data,npm/letsencrypt,halo,v2ray,lunatv,kvrocks,subscriptions}"
+mkdir -p "$BASE_DIR"/{npm/data,npm/letsencrypt,halo,v2ray,lunatv,kvrocks,subscriptions}
 cd "$BASE_DIR"
 
-# ================= VLESS 用户生成 =================
-info "生成 VLESS 用户"
+# ================= VLESS 用户 =================
 UUIDS=()
 for ((i=1;i<=USERS;i++)); do
   UUIDS+=("$(cat /proc/sys/kernel/random/uuid)")
 done
 
-# ================= LunaTV 账号 =================
 LUNATV_USER="admin"
 LUNATV_PASS="$(openssl rand -hex 6)"
 
-# ================= V2Ray 配置 =================
-info "写入 V2Ray 配置"
+# ================= V2Ray =================
+cat > v2ray/config.json <<EOF
 {
-  echo '{'
-  echo ' "inbounds": [{'
-  echo '  "port": 10000,'
-  echo '  "protocol": "vless",'
-  echo '  "settings": {'
-  echo '   "clients": ['
-  for ((i=0;i<${#UUIDS[@]};i++)); do
-    [[ $i -gt 0 ]] && echo ','
-    echo -n "    {\"id\":\"${UUIDS[$i]}\"}"
-  done
-  echo
-  echo '   ], "decryption":"none"'
-  echo '  },'
-  echo '  "streamSettings": { "network":"ws","wsSettings":{"path":"'"$WS_PATH"'"}}'
-  echo ' }],'
-  echo ' "outbounds":[{"protocol":"freedom"}]'
-  echo '}'
-} > v2ray/config.json
+  "inbounds":[{
+    "port":10000,
+    "protocol":"vless",
+    "settings":{
+      "clients":[
+$(printf '        {"id":"%s"},\n' "${UUIDS[@]}" | sed '$ s/,$//')
+      ],
+      "decryption":"none"
+    },
+    "streamSettings":{
+      "network":"ws",
+      "wsSettings":{"path":"$WS_PATH"}
+    }
+  }],
+  "outbounds":[{"protocol":"freedom"}]
+}
+EOF
 
 # ================= Docker Compose =================
-info "写入 docker-compose.yml"
 cat > docker-compose.yml <<EOF
 version: "3.8"
 services:
   npm:
     image: jc21/nginx-proxy-manager:latest
-    ports:
-      - "80:80"
-      - "81:81"
-      - "443:443"
+    ports: ["80:80","81:81","443:443"]
     volumes:
       - ./npm/data:/data
       - ./npm/letsencrypt:/etc/letsencrypt
@@ -158,7 +140,6 @@ services:
     environment:
       - HALO_EXTERNAL_URL=https://$DOMAIN
     expose: ["8090"]
-    restart: always
     networks: [proxy]
 
   v2ray:
@@ -166,14 +147,12 @@ services:
     volumes:
       - ./v2ray:/etc/v2ray
     command: run -c /etc/v2ray/config.json
-    restart: always
     networks: [proxy]
 
   kvrocks:
     image: apache/kvrocks
     volumes:
       - ./kvrocks:/var/lib/kvrocks
-    restart: unless-stopped
     networks: [proxy]
 
   lunatv:
@@ -186,7 +165,6 @@ services:
       - SITE_BASE=https://$DOMAIN/tv
     expose: ["3000"]
     depends_on: [kvrocks]
-    restart: always
     networks: [proxy]
 
 networks:
@@ -194,61 +172,18 @@ networks:
     driver: bridge
 EOF
 
-# ================= 启动 =================
-info "启动服务"
-run "$DC_CMD up -d"
+$DC_CMD up -d
 
-# ================= VLESS 输出 =================
-info "生成 VLESS 链接"
-ENC_PATH="$(printf "%s" "$WS_PATH" | sed 's/\//%2F/g')"
-
-> vless.txt
-for ((i=0;i<${#UUIDS[@]};i++)); do
-  echo "vless://${UUIDS[$i]}@$DOMAIN:443?encryption=none&type=ws&path=$ENC_PATH&security=tls&sni=$DOMAIN#${NAME}-$((i+1))" >> vless.txt
-done
-
-base64 -w0 vless.txt > subscriptions/vless-sub.txt
-
-# ================= 完成输出 =================
-echo ""
-echo "================ 部署完成 ================"
-echo "NPM 管理面板: http://$DOMAIN:81"
-echo "LunaTV 用户名: $LUNATV_USER"
-echo "LunaTV 密码:   $LUNATV_PASS"
-echo ""
-echo "VLESS 链接:"
-cat vless.txt
-echo ""
-echo "订阅文件:"
-echo "$BASE_DIR/subscriptions/vless-sub.txt"
-echo "=========================================="    restart: always
-    networks: [proxy]
-
-networks:
-  proxy:
-    driver: bridge
-EOF
-
-info "启动服务"
-run "$DC_CMD up -d"
-
-info "生成 VLESS 链接"
+# ================= 输出 =================
 ENC_PATH="$(printf "%s" "$WS_PATH" | sed 's/\//%2F/g')"
 > vless.txt
-for ((i=0;i<${#UUIDS[@]};i++)); do
+for i in "${!UUIDS[@]}"; do
   echo "vless://${UUIDS[$i]}@$DOMAIN:443?encryption=none&type=ws&path=$ENC_PATH&security=tls&sni=$DOMAIN#${NAME}-$((i+1))" >> vless.txt
 done
 base64 -w0 vless.txt > subscriptions/vless-sub.txt
 
-echo ""
-echo "================ 部署完成 ================"
+echo "========================================="
 echo "NPM: http://$DOMAIN:81"
 echo "LunaTV 用户名: $LUNATV_USER"
 echo "LunaTV 密码:   $LUNATV_PASS"
-echo ""
-echo "VLESS 链接:"
-cat vless.txt
-echo ""
-echo "订阅文件:"
-echo "$BASE_DIR/subscriptions/vless-sub.txt"
-echo "=========================================="
+echo "========================================="
