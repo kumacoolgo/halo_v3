@@ -13,10 +13,22 @@ ARGS="$*"
 mkdir -p "$TMP"
 cd "$TMP"
 
+download_deploy() {
+  for url in \
+    "https://raw.githubusercontent.com/${REPO}/main/deploy.sh" \
+    "https://cdn.jsdelivr.net/gh/${REPO}@main/deploy.sh" \
+    "https://raw.fastgit.org/${REPO}/main/deploy.sh"
+  do
+    info "尝试下载 deploy.sh: $url"
+    if curl -fsSL "$url" -o deploy.sh; then
+      return 0
+    fi
+  done
+  die "无法从任何镜像下载 deploy.sh"
+}
+
 info "下载 deploy.sh"
-curl -fsSL \
-  "https://raw.githubusercontent.com/${REPO}/main/deploy.sh" \
-  -o deploy.sh || die "无法下载 deploy.sh"
+download_deploy
 
 chmod +x deploy.sh
 
@@ -24,5 +36,5 @@ info "安装到 $BIN"
 cp deploy.sh "$BIN"
 chmod +x "$BIN"
 
-info "开始部署..."
+info "开始执行部署"
 exec "$BIN" $ARGS
