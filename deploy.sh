@@ -3,46 +3,56 @@ set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# ============ 读取配置 ============
+# ================= 读取配置 =================
 source "$BASE_DIR/config.env"
 
-# ============ 工具 ============
+# ================= 工具 =================
 die(){ echo -e "\033[31m❌ $1\033[0m"; exit 1; }
 info(){ echo -e "\033[36m▶ $1\033[0m"; }
 
 [[ $EUID -eq 0 ]] || die "请用 root 运行"
-[[ -n "${DOMAIN:-}" ]] || die "DOMAIN 未配置"
+[[ -n "$DOMAIN" ]] || die "DOMAIN 未配置"
+[[ "$WS_PATH" =~ ^/ ]] || die "WS_PATH 必须以 / 开头"
 
 DC="docker compose"
 
-# ============ Docker 安装（非交互） ============
-if ! command -v docker >/dev/null 2>&1; then
-  info "安装 Docker"
-  export DEBIAN_FRONTEND=noninteractive
-  curl -fsSL https://get.docker.com | sh
+# ================= Docker（阿里云源） =================
+if ! command -v docker >/dev/null; then
+  info "安装 Docker（阿里云 mirrors）"
+
+  apt-get update -y
+  apt-get install -y ca-certificates curl gnupg lsb-release
+
+  mkdir -p /etc/apt/keyrings
+  curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg \
+    | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+  echo \
+"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://mirrors.aliyun.com/docker-ce/linux/ubuntu \
+$(lsb_release -cs) stable" \
+    > /etc/apt/sources.list.d/docker.list
+
+  apt-get update -y
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
   systemctl enable --now docker
 fi
 
-# ============ 依赖 ============
-apt-get update -y
-apt-get install -y jq sqlite3 uuid-runtime
-
-# ============ 目录 ============
+# ================= 目录 =================
 mkdir -p \
+  v2ray \
+  subscriptions \
   npm/data \
   npm/letsencrypt \
-  halo \
-  v2ray \
-  subscriptions
+  halo
 
-cd "$BASE_DIR"
-
-# ============ UUID（幂等） ============
+# ================= UUID（幂等） =================
 USERS_FILE="v2ray/users.json"
 
 if [[ -f $USERS_FILE ]]; then
   info "复用已有 UUID"
-  mapfile -t UUIDS < <(jq -r '.[]' "$USERS_FILE")
+  UUIDS=($(jq -r '.[]' "$USERS_FILE"))
 else
   info "首次生成 UUID"
   UUIDS=()
@@ -52,9 +62,7 @@ else
   printf '%s\n' "${UUIDS[@]}" | jq -R . | jq -s . > "$USERS_FILE"
 fi
 
-# ============ V2Ray 配置 ============
-info "生成 V2Ray 配置"
-
+# ================= V2Ray =================
 cat > v2ray/config.json <<EOF
 {
   "inbounds":[{
@@ -75,12 +83,8 @@ $(printf '        {"id":"%s"},\n' "${UUIDS[@]}" | sed '$ s/,$//')
 }
 EOF
 
-# ============ Docker Compose ============
-info "生成 docker-compose.yml"
-
+# ================= Docker Compose =================
 cat > docker-compose.yml <<EOF
-version: "3.8"
-
 services:
   npm:
     image: jc21/nginx-proxy-manager:latest
@@ -109,32 +113,11 @@ services:
     restart: always
 EOF
 
-# ============ 启动 ============
+# ================= 启动 =================
 info "启动容器"
 $DC up -d
 
-# ============ NPM SQLite 写入 ============
-info "写入 NPM 反代规则（SQLite）"
-
-$DC stop npm
-
-DB="npm/data/database.sqlite"
-
-sqlite3 "$DB" <<EOF
-INSERT OR IGNORE INTO proxy_host
-(id, domain_names, forward_host, forward_port, enabled)
-VALUES
-(1, '["$DOMAIN"]', 'halo', 8090, 1);
-
-INSERT OR IGNORE INTO proxy_host_location
-(proxy_host_id, path, forward_host, forward_port)
-VALUES
-(1, '$WS_PATH', 'v2ray', 10000);
-EOF
-
-$DC start npm
-
-# ============ VLESS 输出 ============
+# ================= VLESS 输出 =================
 ENC_PATH="$(echo "$WS_PATH" | sed 's/\//%2F/g')"
 > subscriptions/vless.txt
 
@@ -145,12 +128,14 @@ done
 
 base64 -w0 subscriptions/vless.txt > subscriptions/vless-sub.txt
 
-# ============ 完成 ============
 echo ""
 echo "================ 部署完成 ================"
-echo "NPM 管理面板: http://$DOMAIN:$NPM_ADMIN_PORT"
-echo "Halo 访问: https://$DOMAIN"
+echo "NPM 面板: http://$DOMAIN:$NPM_ADMIN_PORT"
+echo "Halo: https://$DOMAIN"
 echo ""
-echo "VLESS 订阅:"
+echo "VLESS 链接:"
+cat subscriptions/vless.txt
+echo ""
+echo "订阅文件:"
 echo "$BASE_DIR/subscriptions/vless-sub.txt"
 echo "=========================================="
