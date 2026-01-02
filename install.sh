@@ -15,9 +15,9 @@ cd "$TMP"
 
 download_deploy() {
   for url in \
-    "https://raw.githubusercontent.com/${REPO}/main/deploy.sh" \
+    info "https://raw.githubusercontent.com/${REPO}/main/deploy.sh" \
     "https://cdn.jsdelivr.net/gh/${REPO}@main/deploy.sh" \
-    "https://raw.fastgit.org/${REPO}/main/deploy.sh"
+    info "https://raw.fastgit.org/${REPO}/main/deploy.sh"
   do
     info "尝试下载 deploy.sh: $url"
     if curl -fsSL \
