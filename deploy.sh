@@ -1,103 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ================= 基础配置 =================
-BASE_DIR="/opt/halo-stack"
+BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-DOMAIN=""
-WS_PATH="/connect"
-NAME="halo"
-USERS="3"
-DRY_RUN=false
-UNINSTALL=false
+# ================= 读取配置 =================
+source "$BASE_DIR/config.env"
 
-# ================= 工具函数 =================
+# ================= 工具 =================
 die(){ echo -e "\033[31m❌ $1\033[0m"; exit 1; }
 info(){ echo -e "\033[36m▶ $1\033[0m"; }
-warn(){ echo -e "\033[33m⚠️ $1\033[0m"; }
 
-run() {
-  if $DRY_RUN; then
-    echo "[dry-run] $*"
-  else
-    eval "$@"
-  fi
-}
-
-# ================= 参数解析 =================
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --domain) DOMAIN="$2"; shift 2 ;;
-    --ws-path) WS_PATH="$2"; shift 2 ;;
-    --name) NAME="$2"; shift 2 ;;
-    --users) USERS="$2"; shift 2 ;;
-    --dry-run) DRY_RUN=true; shift ;;
-    --uninstall) UNINSTALL=true; shift ;;
-    *) die "未知参数 $1" ;;
-  esac
-done
-
-# ================= 基础校验 =================
 [[ $EUID -eq 0 ]] || die "请用 root 运行"
-[[ -n "$DOMAIN" ]] || die "--domain 必填"
-[[ "$WS_PATH" =~ ^/ ]] || die "--ws-path 必须以 / 开头"
+[[ -n "$DOMAIN" ]] || die "DOMAIN 未配置"
 
-# ================= Docker 安装 =================
-install_docker() {
-  if command -v docker >/dev/null 2>&1; then
-    info "Docker 已安装，跳过"
-    return
-  fi
+DC="docker compose"
 
-  info "使用阿里云镜像安装 Docker"
-
-  apt-get update -y
-  apt-get install -y ca-certificates curl gnupg lsb-release
-
-  mkdir -p /etc/apt/keyrings
-  curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg \
-    | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-    https://mirrors.aliyun.com/docker-ce/linux/ubuntu \
-    $(lsb_release -cs) stable" \
-    > /etc/apt/sources.list.d/docker.list
-
-  apt-get update -y
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
-  systemctl enable docker
-  systemctl start docker
-}
-
-DC_CMD="docker compose"
-
-# ================= 卸载 =================
-if $UNINSTALL; then
-  cd "$BASE_DIR" 2>/dev/null || exit 0
-  $DC_CMD down || true
-  rm -rf "$BASE_DIR"
-  echo "✅ 已卸载"
-  exit 0
+# ================= Docker =================
+if ! command -v docker >/dev/null; then
+  curl -fsSL https://get.docker.com | bash
+  systemctl enable --now docker
 fi
 
-# ================= 正式执行 =================
-install_docker
+# ================= 目录 =================
+mkdir -p \
+  v2ray \
+  subscriptions \
+  npm/data \
+  npm/letsencrypt \
+  halo \
+  kvrocks
 
-apt-get update -y
-apt-get install -y ufw openssl sqlite3
+# ================= UUID（幂等） =================
+USERS_FILE="v2ray/users.json"
 
-mkdir -p "$BASE_DIR"/{npm/data,npm/letsencrypt,halo,v2ray,lunatv,kvrocks,subscriptions}
-cd "$BASE_DIR"
-
-# ================= VLESS 用户 =================
-UUIDS=()
-for ((i=1;i<=USERS;i++)); do
-  UUIDS+=("$(cat /proc/sys/kernel/random/uuid)")
-done
-
-LUNATV_USER="admin"
-LUNATV_PASS="$(openssl rand -hex 6)"
+if [[ -f $USERS_FILE ]]; then
+  info "复用已有 UUID"
+  UUIDS=($(jq -r '.[]' "$USERS_FILE"))
+else
+  info "首次生成 UUID"
+  UUIDS=()
+  for ((i=1;i<=USERS;i++)); do
+    UUIDS+=("$(uuidgen)")
+  done
+  printf '%s\n' "${UUIDS[@]}" | jq -R . | jq -s . > "$USERS_FILE"
+fi
 
 # ================= V2Ray =================
 cat > v2ray/config.json <<EOF
@@ -125,13 +71,12 @@ cat > docker-compose.yml <<EOF
 version: "3.8"
 services:
   npm:
-    image: jc21/nginx-proxy-manager:latest
-    ports: ["80:80","81:81","443:443"]
+    image: jc21/nginx-proxy-manager
+    ports: ["$NPM_HTTP_PORT:80","$NPM_HTTPS_PORT:443","$NPM_ADMIN_PORT:81"]
     volumes:
       - ./npm/data:/data
       - ./npm/letsencrypt:/etc/letsencrypt
     restart: always
-    networks: [proxy]
 
   halo:
     image: halohub/halo:2.22.4
@@ -139,51 +84,62 @@ services:
       - ./halo:/root/.halo2
     environment:
       - HALO_EXTERNAL_URL=https://$DOMAIN
-    expose: ["8090"]
-    networks: [proxy]
 
   v2ray:
-    image: v2fly/v2fly-core:latest
+    image: v2fly/v2fly-core
     volumes:
       - ./v2ray:/etc/v2ray
     command: run -c /etc/v2ray/config.json
-    networks: [proxy]
 
   kvrocks:
     image: apache/kvrocks
     volumes:
       - ./kvrocks:/var/lib/kvrocks
-    networks: [proxy]
 
   lunatv:
     image: ghcr.io/szemeng76/lunatv:latest
     environment:
       - USERNAME=$LUNATV_USER
-      - PASSWORD=$LUNATV_PASS
-      - NEXT_PUBLIC_STORAGE_TYPE=kvrocks
+      - PASSWORD=$(openssl rand -hex 6)
       - KVROCKS_URL=redis://kvrocks:6666
-      - SITE_BASE=https://$DOMAIN/tv
-    expose: ["3000"]
-    depends_on: [kvrocks]
-    networks: [proxy]
-
-networks:
-  proxy:
-    driver: bridge
 EOF
 
-$DC_CMD up -d
+$DC up -d
 
-# ================= 输出 =================
-ENC_PATH="$(printf "%s" "$WS_PATH" | sed 's/\//%2F/g')"
-> vless.txt
+# ================= NPM SQLite 写入 =================
+info "写入 NPM 反代规则"
+$DC stop npm
+
+DB="npm/data/database.sqlite"
+
+sqlite3 "$DB" <<EOF
+INSERT OR IGNORE INTO proxy_host
+(id, domain_names, forward_host, forward_port, enabled)
+VALUES
+(1, '["$DOMAIN"]', 'halo', 8090, 1);
+
+INSERT OR IGNORE INTO proxy_host_location
+(proxy_host_id, path, forward_host, forward_port)
+VALUES
+(1, '$WS_PATH', 'v2ray', 10000),
+(1, '/tv', 'lunatv', 3000);
+EOF
+
+$DC start npm
+
+# ================= VLESS 输出 =================
+ENC_PATH="$(echo "$WS_PATH" | sed 's/\//%2F/g')"
+> subscriptions/vless.txt
+
 for i in "${!UUIDS[@]}"; do
-  echo "vless://${UUIDS[$i]}@$DOMAIN:443?encryption=none&type=ws&path=$ENC_PATH&security=tls&sni=$DOMAIN#${NAME}-$((i+1))" >> vless.txt
+  echo "vless://${UUIDS[$i]}@$DOMAIN:443?type=ws&path=$ENC_PATH&security=tls#${NAME}-$((i+1))" \
+    >> subscriptions/vless.txt
 done
-base64 -w0 vless.txt > subscriptions/vless-sub.txt
 
-echo "========================================="
-echo "NPM: http://$DOMAIN:81"
-echo "LunaTV 用户名: $LUNATV_USER"
-echo "LunaTV 密码:   $LUNATV_PASS"
-echo "========================================="
+base64 -w0 subscriptions/vless.txt > subscriptions/vless-sub.txt
+
+echo ""
+echo "================ 完成 ================"
+echo "NPM: http://$DOMAIN:$NPM_ADMIN_PORT"
+echo "订阅文件: subscriptions/vless-sub.txt"
+echo "====================================="
