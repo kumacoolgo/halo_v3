@@ -20,8 +20,15 @@ download_deploy() {
     "https://raw.fastgit.org/${REPO}/main/deploy.sh"
   do
     info "尝试下载 deploy.sh: $url"
-    if curl -fsSL "$url" -o deploy.sh; then
+    if curl -fsSL \
+      --connect-timeout 5 \
+      --max-time 10 \
+      "$url" -o deploy.sh
+    then
+      info "✔ 成功从该地址下载 deploy.sh"
       return 0
+    else
+      info "✖ 该地址不可用，尝试下一个"
     fi
   done
   die "无法从任何镜像下载 deploy.sh"
