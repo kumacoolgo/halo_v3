@@ -1,114 +1,94 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ==================================================
-# 基础路径
-# ==================================================
+# ================= 基础 =================
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$BASE_DIR"
 
-# ==================================================
-# 读取配置
-# ==================================================
-CONFIG_FILE="$BASE_DIR/config.env"
-[[ -f "$CONFIG_FILE" ]] || { echo "❌ 缺少 config.env"; exit 1; }
-source "$CONFIG_FILE"
+# ================= 读取配置 =================
+source "$BASE_DIR/config.env"
 
-# ==================================================
-# 工具函数
-# ==================================================
+# ================= 工具函数 =================
 die(){ echo -e "\033[31m❌ $1\033[0m"; exit 1; }
 info(){ echo -e "\033[36m▶ $1\033[0m"; }
 
-# ==================================================
-# 基础校验
-# ==================================================
-[[ $EUID -eq 0 ]] || die "请使用 root 运行"
-[[ -n "${DOMAIN:-}" ]] || die "DOMAIN 未配置"
-[[ -n "${USERS:-}" ]] || die "USERS 未配置"
+# ================= 校验 =================
+[[ $EUID -eq 0 ]] || die "请用 root 运行"
+[[ -n "${DOMAIN:-}" ]] || die "config.env 中未配置 DOMAIN"
+[[ -n "${WS_PATH:-}" ]] || die "config.env 中未配置 WS_PATH"
 [[ "$WS_PATH" =~ ^/ ]] || die "WS_PATH 必须以 / 开头"
-
-command -v docker >/dev/null || die "未检测到 docker，请先安装 docker"
-command -v jq >/dev/null || die "缺少 jq，请先安装 jq"
-command -v sqlite3 >/dev/null || die "缺少 sqlite3，请先安装 sqlite3"
 
 DC="docker compose"
 
-# ==================================================
-# 目录结构
-# ==================================================
-info "准备目录结构"
-mkdir -p \
-  "$BASE_DIR/v2ray" \
-  "$BASE_DIR/subscriptions" \
-  "$BASE_DIR/npm/data" \
-  "$BASE_DIR/npm/letsencrypt" \
-  "$BASE_DIR/halo" \
-  "$BASE_DIR/kvrocks" \
-  "$BASE_DIR/lunatv"
+# ================= Docker 检查 =================
+if ! command -v docker >/dev/null 2>&1; then
+  die "Docker 未安装，请先手动安装并配置镜像加速"
+fi
 
-# ==================================================
-# UUID（幂等）
-# ==================================================
-USERS_FILE="$BASE_DIR/v2ray/users.json"
+# ================= 依赖 =================
+apt-get update -y >/dev/null
+apt-get install -y jq sqlite3 openssl >/dev/null
+
+# ================= 目录 =================
+info "初始化目录结构"
+mkdir -p \
+  v2ray \
+  subscriptions \
+  npm/data \
+  npm/letsencrypt \
+  halo \
+  kvrocks
+
+# ================= UUID（幂等） =================
+USERS_FILE="v2ray/users.json"
+UUIDS=()
 
 if [[ -f "$USERS_FILE" ]]; then
   info "复用已有 UUID"
   mapfile -t UUIDS < <(jq -r '.[]' "$USERS_FILE")
 else
   info "首次生成 UUID"
-  UUIDS=()
   for ((i=1;i<=USERS;i++)); do
     UUIDS+=("$(uuidgen)")
   done
   printf '%s\n' "${UUIDS[@]}" | jq -R . | jq -s . > "$USERS_FILE"
 fi
 
-# ==================================================
-# LunaTV 密码（幂等）
-# ==================================================
-LUNATV_PASS_FILE="$BASE_DIR/lunatv/password"
-
-if [[ -f "$LUNATV_PASS_FILE" ]]; then
-  LUNATV_PASS="$(cat "$LUNATV_PASS_FILE")"
-else
-  LUNATV_PASS="$(openssl rand -hex 6)"
-  echo "$LUNATV_PASS" > "$LUNATV_PASS_FILE"
-fi
-
-# ==================================================
-# V2Ray 配置
-# ==================================================
-info "生成 V2Ray 配置"
-
-CLIENTS_JSON=$(printf '        {"id":"%s"},\n' "${UUIDS[@]}" | sed '$ s/,$//')
-
-cat > "$BASE_DIR/v2ray/config.json" <<EOF
+# ================= V2Ray 配置 =================
+info "写入 V2Ray 配置"
+cat > v2ray/config.json <<EOF
 {
-  "inbounds":[{
-    "port":10000,
-    "protocol":"vless",
-    "settings":{
-      "clients":[
-$CLIENTS_JSON
+  "inbounds": [{
+    "port": 10000,
+    "protocol": "vless",
+    "settings": {
+      "clients": [
+$(printf '        {"id":"%s"},\n' "${UUIDS[@]}" | sed '$ s/,$//')
       ],
-      "decryption":"none"
+      "decryption": "none"
     },
-    "streamSettings":{
-      "network":"ws",
-      "wsSettings":{"path":"$WS_PATH"}
+    "streamSettings": {
+      "network": "ws",
+      "wsSettings": { "path": "$WS_PATH" }
     }
   }],
-  "outbounds":[{"protocol":"freedom"}]
+  "outbounds": [{ "protocol": "freedom" }]
 }
 EOF
 
-# ==================================================
-# Docker Compose
-# ==================================================
-info "生成 docker-compose.yml"
+# ================= LunaTV 密码（幂等） =================
+if [[ ! -f lunatv/.env ]]; then
+  info "生成 LunaTV 初始密码"
+  mkdir -p lunatv
+  echo "LUNATV_PASSWORD=$(openssl rand -hex 6)" > lunatv/.env
+fi
+source lunatv/.env
 
-cat > "$BASE_DIR/docker-compose.yml" <<EOF
+# ================= Docker Compose =================
+info "生成 docker-compose.yml"
+cat > docker-compose.yml <<EOF
 version: "3.8"
+
 services:
   npm:
     image: jc21/nginx-proxy-manager:latest
@@ -126,7 +106,7 @@ services:
     volumes:
       - ./halo:/root/.halo2
     environment:
-      - HALO_EXTERNAL_URL=https://$DOMAIN
+      - HALO_EXTERNAL_URL=https://${DOMAIN}
     restart: always
 
   v2ray:
@@ -140,74 +120,66 @@ services:
     image: apache/kvrocks
     volumes:
       - ./kvrocks:/var/lib/kvrocks
-    restart: unless-stopped
+    restart: always
 
   lunatv:
     image: ghcr.io/szemeng76/lunatv:latest
     environment:
-      - USERNAME=$LUNATV_USER
-      - PASSWORD=$LUNATV_PASS
+      - USERNAME=${LUNATV_USER}
+      - PASSWORD=${LUNATV_PASSWORD}
+      - NEXT_PUBLIC_STORAGE_TYPE=kvrocks
       - KVROCKS_URL=redis://kvrocks:6666
+      - SITE_BASE=https://${DOMAIN}/tv
+    depends_on:
+      - kvrocks
     restart: always
 EOF
 
-# ==================================================
-# 启动服务
-# ==================================================
+# ================= 启动 =================
 info "启动 Docker 服务"
 $DC up -d
 
-# ==================================================
-# NPM SQLite 反代写入（幂等）
-# ==================================================
-info "写入 NPM 反代规则"
-
+# ================= NPM SQLite 反代写入 =================
+info "写入 NPM 反代规则（SQLite）"
 $DC stop npm
 
-DB="$BASE_DIR/npm/data/database.sqlite"
-[[ -f "$DB" ]] || die "NPM 数据库未生成，请等待 npm 容器初始化后再运行一次 deploy.sh"
+DB="npm/data/database.sqlite"
+[[ -f "$DB" ]] || die "NPM 数据库不存在，npm 未正确启动"
 
 sqlite3 "$DB" <<EOF
 INSERT OR IGNORE INTO proxy_host
-(domain_names, forward_host, forward_port, enabled, access_list_id)
+(id, domain_names, forward_host, forward_port, enabled)
 VALUES
-('["$DOMAIN"]', 'halo', 8090, 1, 0);
+(1, '["${DOMAIN}"]', 'halo', 8090, 1);
 
 INSERT OR IGNORE INTO proxy_host_location
 (proxy_host_id, path, forward_host, forward_port)
-SELECT id, '$WS_PATH', 'v2ray', 10000
-FROM proxy_host WHERE domain_names='["$DOMAIN"]';
-
-INSERT OR IGNORE INTO proxy_host_location
-(proxy_host_id, path, forward_host, forward_port)
-SELECT id, '/tv', 'lunatv', 3000
-FROM proxy_host WHERE domain_names='["$DOMAIN"]';
+VALUES
+(1, '${WS_PATH}', 'v2ray', 10000),
+(1, '/tv', 'lunatv', 3000);
 EOF
 
 $DC start npm
 
-# ==================================================
-# VLESS 输出
-# ==================================================
-info "生成 VLESS 链接"
-
+# ================= VLESS 输出 =================
+info "生成 VLESS 订阅"
 ENC_PATH="$(echo "$WS_PATH" | sed 's/\//%2F/g')"
-> "$BASE_DIR/subscriptions/vless.txt"
+> subscriptions/vless.txt
 
 for i in "${!UUIDS[@]}"; do
-  echo "vless://${UUIDS[$i]}@$DOMAIN:443?encryption=none&type=ws&path=$ENC_PATH&security=tls&sni=$DOMAIN#${NAME}-$((i+1))" \
-    >> "$BASE_DIR/subscriptions/vless.txt"
+  echo "vless://${UUIDS[$i]}@${DOMAIN}:443?encryption=none&type=ws&path=${ENC_PATH}&security=tls&sni=${DOMAIN}#${NAME}-$((i+1))" \
+    >> subscriptions/vless.txt
 done
 
-base64 -w0 "$BASE_DIR/subscriptions/vless.txt" > "$BASE_DIR/subscriptions/vless-sub.txt"
+base64 -w0 subscriptions/vless.txt > subscriptions/vless-sub.txt
 
-# ==================================================
-# 完成
-# ==================================================
+# ================= 完成 =================
 echo ""
-echo "================ 部署完成 ================"
-echo "NPM 管理面板: http://$DOMAIN:$NPM_ADMIN_PORT"
-echo "LunaTV 用户名: $LUNATV_USER"
-echo "LunaTV 密码:   $LUNATV_PASS"
-echo "订阅文件:     subscriptions/vless-sub.txt"
-echo "=========================================="
+echo "================= 部署完成 ================="
+echo "NPM 管理面板: http://${DOMAIN}:${NPM_ADMIN_PORT}"
+echo "LunaTV 用户名: ${LUNATV_USER}"
+echo "LunaTV 密码:   ${LUNATV_PASSWORD}"
+echo ""
+echo "VLESS 订阅文件:"
+echo "  ${BASE_DIR}/subscriptions/vless-sub.txt"
+echo "==========================================="
