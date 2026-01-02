@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="你的GitHub用户名/halo-v3"   # ←←← 改这里
+REPO="kumacoolgo/halo_v3"
 BIN="/usr/local/bin/halo-vps-deploy"
 TMP="/tmp/halo-vps-deploy"
 
