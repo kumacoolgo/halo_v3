@@ -46,6 +46,11 @@ if ! command -v jq >/dev/null; then
   apt-get install -y jq
 fi
 
+if ! command -v uuidgen >/dev/null; then
+  info "安装 uuidgen"
+  apt-get install -y uuid-runtime
+fi
+
 # ================= 目录 =================
 mkdir -p \
   v2ray \
