@@ -39,6 +39,13 @@ $(lsb_release -cs) stable" \
   systemctl enable --now docker
 fi
 
+# ================= 工具依赖 =================
+if ! command -v jq >/dev/null; then
+  info "安装 jq"
+  apt-get update -y
+  apt-get install -y jq
+fi
+
 # ================= 目录 =================
 mkdir -p \
   v2ray \
