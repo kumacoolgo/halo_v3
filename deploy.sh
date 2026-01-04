@@ -6,17 +6,28 @@ BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ================= 读取配置 =================
 source "$BASE_DIR/config.env"
 
-# ================= 工具 =================
+# ================= 工具函数 =================
 die(){ echo -e "\033[31m❌ $1\033[0m"; exit 1; }
 info(){ echo -e "\033[36m▶ $1\033[0m"; }
 
+# ================= 参数校验 =================
+USERS="${USERS:-1}"
+
 [[ $EUID -eq 0 ]] || die "请用 root 运行"
-[[ -n "$DOMAIN" ]] || die "DOMAIN 未配置"
+[[ -n "${DOMAIN:-}" ]] || die "DOMAIN 未配置"
+[[ -n "${WS_PATH:-}" ]] || die "WS_PATH 未配置"
 [[ "$WS_PATH" =~ ^/ ]] || die "WS_PATH 必须以 / 开头"
 
-DC="docker compose"
+# ================= Docker Compose 兼容 =================
+if docker compose version >/dev/null 2>&1; then
+  DC="docker compose"
+elif docker-compose version >/dev/null 2>&1; then
+  DC="docker-compose"
+else
+  DC=""
+fi
 
-# ================= Docker（阿里云源） =================
+# ================= Docker（阿里云镜像源） =================
 if ! command -v docker >/dev/null; then
   info "安装 Docker（阿里云 mirrors）"
 
@@ -35,7 +46,6 @@ $(lsb_release -cs) stable" \
 
   apt-get update -y
   apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
   systemctl enable --now docker
 fi
 
@@ -51,6 +61,17 @@ if ! command -v uuidgen >/dev/null; then
   apt-get install -y uuid-runtime
 fi
 
+# ================= Docker Compose 再确认 =================
+if [[ -z "$DC" ]]; then
+  if docker compose version >/dev/null 2>&1; then
+    DC="docker compose"
+  elif docker-compose version >/dev/null 2>&1; then
+    DC="docker-compose"
+  else
+    die "未找到 docker compose"
+  fi
+fi
+
 # ================= 目录 =================
 mkdir -p \
   v2ray \
@@ -64,9 +85,9 @@ USERS_FILE="v2ray/users.json"
 
 if [[ -f $USERS_FILE ]]; then
   info "复用已有 UUID"
-  UUIDS=($(jq -r '.[]' "$USERS_FILE"))
+  mapfile -t UUIDS < <(jq -r '.[]' "$USERS_FILE")
 else
-  info "首次生成 UUID"
+  info "首次生成 UUID（$USERS 个）"
   UUIDS=()
   for ((i=1;i<=USERS;i++)); do
     UUIDS+=("$(uuidgen)")
@@ -74,24 +95,24 @@ else
   printf '%s\n' "${UUIDS[@]}" | jq -R . | jq -s . > "$USERS_FILE"
 fi
 
-# ================= V2Ray =================
+# ================= V2Ray 配置 =================
 cat > v2ray/config.json <<EOF
 {
-  "inbounds":[{
-    "port":10000,
-    "protocol":"vless",
-    "settings":{
-      "clients":[
+  "inbounds": [{
+    "port": 10000,
+    "protocol": "vless",
+    "settings": {
+      "clients": [
 $(printf '        {"id":"%s"},\n' "${UUIDS[@]}" | sed '$ s/,$//')
       ],
-      "decryption":"none"
+      "decryption": "none"
     },
-    "streamSettings":{
-      "network":"ws",
-      "wsSettings":{"path":"$WS_PATH"}
+    "streamSettings": {
+      "network": "ws",
+      "wsSettings": { "path": "$WS_PATH" }
     }
   }],
-  "outbounds":[{"protocol":"freedom"}]
+  "outbounds": [{ "protocol": "freedom" }]
 }
 EOF
 
